@@ -1,0 +1,519 @@
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(leaps)
+library(caret)
+library(ggthemes)
+library(glmnet)
+library(ggplot2)
+library(MASS)
+library(rpart)
+library(rpart.plot)
+
+```
+
+
+# Libraries I Added
+```{r}
+# Decision Tree Model
+library(rsample)     # data splitting 
+library(dplyr)       # data wrangling
+library(rpart)       # performing regression trees
+library(rpart.plot)  # plotting regression trees
+library(ipred)       # bagging
+library(caret)
+```
+
+
+
+```{r}
+analysisData = read.csv('analysisData.csv', na.strings = c("NaN", "none","N/A","")) # Chance string NaN values to NaN type
+scoringData = read.csv('scoringData.csv')
+
+model = lm(price~minimum_nights+number_of_reviews,analysisData) 
+pred= predict(model, newdata=scoringData)
+
+submissionFile= data.frame(id = scoringData$id, price = pred)
+write.csv(submissionFile, 'sample_submission.csv',row.names= F)
+```
+
+```{r}
+# Cell Block to Collect Summary Stats about the data provided
+ncol(analysisData) #96 Columns Starting
+nrow(analysisData)
+
+```
+
+
+```{r}
+#creating a price column
+
+namevector <- c("price")
+scoringData[,namevector] <- NaN # NaN instead of 0 here to make it easier to split back out later on
+scoringData <- scoringData %>%
+  select(id,price, everything())
+```
+
+```{r}
+#checking if data set is the same
+
+all_equal(analysisData, scoringData, convert = TRUE)
+
+analysisData$zipcode <- as.character(analysisData$zipcode)
+scoringData$zipcode <- as.character(scoringData$zipcode)
+
+analysisData$host_is_superhost <- as.logical(analysisData$host_is_superhost)
+analysisData$host_has_profile_pic <- as.logical(analysisData$host_has_profile_pic)
+analysisData$host_identity_verified <- as.logical(analysisData$host_identity_verified)
+analysisData$instant_bookable <- as.logical(analysisData$instant_bookable)
+analysisData$require_guest_profile_picture <- as.logical(analysisData$require_guest_profile_picture)
+analysisData$require_guest_phone_verification <- as.logical(analysisData$require_guest_phone_verification)
+analysisData$is_location_exact <- as.logical(analysisData$is_location_exact)
+
+all_equal(analysisData, scoringData, convert = TRUE)
+```
+
+```{r}
+#Pipelining the model
+
+set.seed(5656)
+ksplit <- createDataPartition(y = analysisData$price, p=.7, list=F, groups=50)
+train <- analysisData[ksplit,]
+test <- analysisData[-ksplit,]
+
+train$train_test_score <- "train"
+test$train_test_score <- "test"
+scoringData$train_test_score <- "score"
+baseData <- bind_rows(train,test,scoringData)
+```
+```{r}
+# Dealing With NaN's
+## Missing Values / String none / NaN representations have already been convereted to NaN type when reading in CSV
+                                
+# Count number of NaN values in each column
+colSums(is.na(baseData)) # Check for NaN's
+
+# Visualize Missing Data
+# Missing Values on Just Analysis Data
+#### We make deciions based on only analysis data as scoring data should be independent for correct accuracy
+missing.values <- baseData %>%
+  gather(key = "key", value = "val") %>%
+  mutate(isna = is.na(val)) %>%
+  group_by(key) %>%
+  mutate(total = n()) %>%
+  group_by(key, total, isna) %>%
+  summarise(num.isna = n()) %>%
+  mutate(pct = num.isna / total * 100)
+
+levels <-
+    (missing.values  %>% filter(isna == T) %>% arrange(desc(pct)))$key
+
+percentage.plot <- missing.values %>%
+      ggplot() +
+        geom_bar(aes(x = reorder(key, desc(pct)), 
+                     y = pct, fill=isna), 
+                 stat = 'identity', alpha=0.8) +
+      scale_x_discrete(limits = levels) +
+      scale_fill_manual(name = "", 
+                        values = c('steelblue', 'tomato3'), labels = c("Present", "Missing")) +
+      coord_flip() +
+      labs(title = "Percentage of missing values", x =
+             'Variable', y = "% of missing values")
+
+percentage.plot
+```
+
+
+# Clean the baseData data in a more straightforward fassion
+
+```{r}
+# Get rid of unecesary columns
+
+
+# Columns to drop:
+# Drop Because they have text (requiring NLP)
+# Name, Summary, Space, Description, Notes, Transit, Access, Interaction, House Rules, Host_about, Host_verifications, Amenities, Calander_updated 
+
+# Drop Because Unique to Each Individual Property
+# Host_ID, Host_name 
+
+# Drop Because the Information is Captured More Accurately in Another Column
+# host_neighborhood, host_location, Street, Neighbourhood, City, State, Smart_location, Latitude, Longitude, 
+
+# Drop Because they Contain no useful information (columns contain all same value for example)
+## experiences_offered(all none), Market, Country_code, Country  
+
+# Drop For Other Reasons
+#Host_since, Calendar_last_updated, first_review, Last_review 
+
+# Dropped for N/A Reasons - From above analysis.
+# Response_Time, Response_Rate, Acceptance_rate, Square_feet, Weekly_price, Monthly_price, License, Jurisdiction_Name
+
+
+baseData_clean <- baseData[, -c(3:21,23,26,29:30,33,34,36:41,50:53,66,72,75,76,85:86)]
+
+#40 Cols Dropped
+```
+
+```{r}
+#Check cleaned data for missing values
+
+
+missing.values <- baseData_clean %>%
+  gather(key = "key", value = "val") %>%
+  mutate(isna = is.na(val)) %>%
+  group_by(key) %>%
+  mutate(total = n()) %>%
+  group_by(key, total, isna) %>%
+  summarise(num.isna = n()) %>%
+  mutate(pct = num.isna / total * 100)
+
+levels <-
+    (missing.values  %>% filter(isna == T) %>% arrange(desc(pct)))$key
+
+percentage.plot <- missing.values %>%
+      ggplot() +
+        geom_bar(aes(x = reorder(key, desc(pct)), 
+                     y = pct, fill=isna), 
+                 stat = 'identity', alpha=0.8) +
+      scale_x_discrete(limits = levels) +
+      scale_fill_manual(name = "", 
+                        values = c('steelblue', 'tomato3'), labels = c("Present", "Missing")) +
+      coord_flip() +
+      labs(title = "Percentage of missing values", x =
+             'Variable', y = "% of missing values")
+
+percentage.plot
+
+```
+
+
+
+```{r}
+#Impute Averages for missing Numeric values
+
+# Seperate Numeric from Categorical Data
+nums <- unlist(lapply(baseData_clean, is.numeric))
+not_nums <- unlist(lapply(baseData_clean, negate(is.numeric)))
+
+num_data <- baseData_clean[ , nums]
+num_data <- num_data[,-c(2) ] # Don't impute numerical values for price
+cat_data <- baseData_clean[ , not_nums]
+
+# Replace numerical missing Values with column mean
+num_data <- replace_na(num_data,as.list(colMeans(num_data,na.rm=T)))
+
+#Replace Categorical missing Data
+#colSums(is.na(cat_data))
+# Booleans missing are turned false
+cat_data$host_is_superhost[is.na(cat_data$host_is_superhost)] <- FALSE
+cat_data$host_has_profile_pic[is.na(cat_data$host_has_profile_pic)] <- FALSE
+cat_data$host_identity_verified[is.na(cat_data$host_identity_verified)] <- FALSE
+
+#Impute mode for bed_type
+mode_bed <- unique(cat_data$bed_type)[cat_data$bed_type %>%
+                match(unique(cat_data$bed_type)) %>% 
+                tabulate() %>%
+                which.max()]
+cat_data$bed_type[is.na(cat_data$bed_type)] <- mode_bed
+
+# Replace Missing Zipcodes with Mode Zipcodes corresponding to Neighbourhood_cleansed_grouped
+
+unique(cat_data$neighbourhood_group_cleansed) # Get unique neighbourhoods
+
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+neighbs <- unique(cat_data$neighbourhood_group_cleansed)
+
+for (i in neighbs){
+  if(nrow(cat_data[cat_data$neighbourhood_group_cleansed == i & is.na(cat_data$zipcode),]) > 0){
+    mode <- getmode(cat_data[cat_data$neighbourhood_group_cleansed == i,]$zipcode)
+    cat_data[cat_data$neighbourhood_group_cleansed == i,]$zipcode <- mode
+  }
+}
+
+# Reconnect price with categorical varibles and cleaned numerical variables
+price <- baseData_clean$price
+baseData_clean <- cbind(price,num_data, cat_data)
+
+colSums(is.na(baseData_clean))
+
+# Price is now the only column containing NaN's as the scoring prices are unknown
+```
+  
+  
+```{r}
+# Deal with Special cases of limited rows that don't comply with model building
+
+# Zipcode - Turn Special cases into 0's to keep the variable Numerical and Create and 'other' group
+# list of values that only appear in one of train, test, or score
+l = list(10112,10174,10270,10308,1009,"07093",10281,10307,7302,11239,11001,10118)
+for (i in l){
+  baseData_clean[baseData_clean$zipcode == i,]$zipcode <- 0
+}
+
+
+# Replace strings with numerical version
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10001'] <- 10001
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10003'] <- 10003
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10012'] <- 10012
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10017'] <- 10017
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10018'] <- 10018
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10019'] <- 10019
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10022'] <- 10022
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10023'] <- 10023
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10065'] <- 10065
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10128'] <- 10128
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10280'] <- 10280
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 11201'] <- 11201
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10006'] <- 10006
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 10038'] <- 10038
+baseData_clean$zipcode[baseData_clean$zipcode == 'NY 11249'] <- 11249
+baseData_clean$zipcode[baseData_clean$zipcode == '11385-2308'] <- 11385
+
+baseData_clean$zipcode <- as.numeric(as.character(baseData_clean$zipcode))
+
+```
+
+
+
+```{r}
+# Neighborhood_cleansed
+## group one off neighborhoods or neighborhoods existing in only train, test, or score into one 'Other' group
+n_list <- list('Emerson Hill', 'Gerritsen Beach', 'Huguenot', 'North Riverdale', 'New Brighton', 'Breezy Point', 'Co-op City', 'Willowbrook','Woodrow', 'Bull\'s Head', 'Castle Hill', 'Fort Wadsworth','Tottenville')
+
+for (i in n_list){
+  baseData_clean[baseData_clean$neighbourhood_cleansed == i,]$neighbourhood_cleansed <- 'Other'
+}
+
+```
+
+
+
+
+
+
+```{r}
+#Check Count of each
+table(baseData_clean$bed_type)
+table(baseData_clean$room_type)
+table(baseData_clean$property_type)
+table(baseData_clean$cancellation_policy)
+
+```
+```{r}
+# Check for missing information across factored Variables
+
+#baseData %>% 
+#  count(property_type, train_test_score) %>% 
+#  group_by(property_type) %>% 
+#  pivot_wider(names_from=train_test_score, values_from=c(n)) %>% 
+#  filter(is.na(train) || is.na(test) || is.na(score)) %>%
+#  mutate(score = coalesce(score, 0)) %>%
+#  mutate(test = coalesce(test, 0)) %>%
+#  mutate(train = coalesce(train, 0))
+
+#baseData_clean %>% 
+#  count(property_type, train_test_score) %>% 
+#  group_by(property_type) %>% 
+#  pivot_wider(names_from=train_test_score, values_from=c(n))
+```
+
+
+```{r}
+# Group the least common categories together where applicable
+
+# Cancelation Policy
+baseData_clean$cancellation_policy[baseData_clean$cancellation_policy == 'super_strict_60'] <- 'strict'
+baseData_clean$cancellation_policy[baseData_clean$cancellation_policy == 'super_strict_30'] <- 'strict'
+
+# Property_type
+baseData_clean$property_type[baseData_clean$property_type == 'Dome house'] <- 'Apartment'
+baseData_clean$property_type[baseData_clean$property_type == 'In-law'] <- 'Apartment'
+baseData_clean$property_type[baseData_clean$property_type == 'Train'] <- 'Other'
+baseData_clean$property_type[baseData_clean$property_type == 'Castle'] <- 'House'
+baseData_clean$property_type[baseData_clean$property_type == 'Dorm'] <- 'Hostel' 
+baseData_clean$property_type[baseData_clean$property_type == 'Island'] <- 'Other'
+baseData_clean$property_type[baseData_clean$property_type == 'Villa'] <- 'House'
+baseData_clean$property_type[baseData_clean$property_type == 'Barn'] <- "Earth house"
+baseData_clean$property_type[baseData_clean$property_type == 'Bus'] <- 'Other'
+baseData_clean$property_type[baseData_clean$property_type == 'Cave'] <- "Earth house"
+baseData_clean$property_type[baseData_clean$property_type == 'Lighthouse'] <- 'Other'
+baseData_clean$property_type[baseData_clean$property_type == 'Tent'] <- "Earth house"
+baseData_clean$property_type[baseData_clean$property_type == 'Yurt'] <- "Earth house" 
+baseData_clean$property_type[baseData_clean$property_type == 'Cabin'] <- 'House'
+baseData_clean$property_type[baseData_clean$property_type == 'Farm stay'] <- "Earth house"
+baseData_clean$property_type[baseData_clean$property_type == 'Boat'] <- 'Other'
+baseData_clean$property_type[baseData_clean$property_type == 'Camper/RV'] <- "Earth house"
+baseData_clean$property_type[baseData_clean$property_type == 'Cottage'] <- 'Other'
+baseData_clean$property_type[baseData_clean$property_type == 'Houseboat'] <- 'Other' 
+baseData_clean$property_type[baseData_clean$property_type == 'Casa particular (Cuba)'] <- 'House' 
+baseData_clean$property_type[baseData_clean$property_type == 'Bungalow'] <- 'Other'
+
+  
+```
+
+
+
+```{r}
+# Factor Data
+# cancelation_policy, bed_type, room_type, property_type, city,  
+baseData_clean$bed_type <- factor(baseData_clean$bed_type)
+baseData_clean$room_type <- factor(baseData_clean$room_type)
+baseData_clean$property_type <- factor(baseData_clean$property_type)
+baseData_clean$cancellation_policy <- factor(baseData_clean$cancellation_policy)
+
+
+```
+
+
+
+```{r}
+# Filter the cleaned data back into train test and score
+train <- baseData_clean  %>% 
+  filter(train_test_score == "train")
+test <- baseData_clean  %>% 
+  filter(train_test_score == "test")
+score <- baseData_clean  %>% 
+  filter(train_test_score == "score")
+
+nrow(analysisData); nrow(train); nrow(test); nrow(score);
+```
+```{r}
+#drop the train_test_score column from each of the above
+train <- train[,-c(56)]
+test <- test[,-c(56)]
+score<- score[,-c(56)]
+
+
+```
+
+
+
+# The RMSE to beat
+```{r}
+#Model Building 
+modelLinear = lm(price~minimum_nights+number_of_reviews, data=train)
+summary(modelLinear)
+
+predLinearTrain <- predict(modelLinear, newdata=train)
+caret::postResample(pred = predLinearTrain, train$price)
+
+predLinearTest <- predict(modelLinear, newdata=test)
+caret::postResample(pred = predLinearTest, test$price)
+
+```
+
+
+
+```{r}
+# Visualize the important features to this model
+g <- ggplot(train, aes(x=price)) + geom_histogram()
+g + ggtitle('Distribution of Nightly Prices')
+
+g2 <- ggplot(train[train$price <= 1000, ], aes(x=price)) + geom_histogram()
+g2 + ggtitle('Distribution of Nightly Prices < $1000')
+```
+
+
+```{r}
+# Price by Room type
+g <- ggplot(baseData_clean[baseData_clean$price<1000,], aes(x=price, color=property_type)) + geom_histogram()
+g + ggtitle('Distribution of Prices by Property_Type')
+```
+
+
+
+```{r}
+# Improved Linear Regression with selected variables
+model_lm_comp <- lm(price~room_type+review_scores_accuracy+property_type+accommodates+cleaning_fee+zipcode+neighbourhood_cleansed, data = train)
+
+#summary(model_lm_comp)
+
+pred_train <- predict(model_lm_comp, newdata=train)
+caret::postResample(pred = pred_train, train$price)
+
+predLinearTest <- predict(model_lm_comp, newdata=test)
+caret::postResample(pred = predLinearTest, test$price)
+
+
+
+```
+
+
+
+```{r}
+
+# Fit the full model 
+full.model <- lm(price ~., data = train)
+# Stepwise regression model
+step.model <- stepAIC(full.model, direction = "both", 
+                       trace = FALSE)
+summary(step.model)
+```
+
+```{r}
+
+pred_train <- predict(step.model, newdata=train)
+caret::postResample(pred = pred_train, train$price)
+
+predLinearTest <- predict(step.model, newdata=test)
+caret::postResample(pred = predLinearTest, test$price)
+
+```
+
+
+
+```{r}
+m1 <- rpart(
+  formula = price ~ .,
+  data = train,
+  method  = "anova",
+  maxdepth = 6
+  )
+```
+
+
+```{r}
+predDTreeTrain <- predict(object = m1,   # model object 
+                newdata = train)
+
+predDTreeTest <- predict(object = m1,   # model object 
+                newdata = test)
+
+
+caret::postResample(pred = predDTreeTrain, train$price)
+caret::postResample(pred = predDTreeTest, test$price)
+```
+
+
+```{r}
+
+rpart.plot(m1, box.palette="RdBu", shadow.col="gray", nn=TRUE)
+
+```
+
+```{r}
+ggplot(test, aes(price)) + 
+  geom_jitter(aes(y = predDTreeTest, colour = "Predicted")) + 
+  geom_jitter(aes(y = test$price, colour = "Actual")) +
+  ggtitle('Predicted Prices vs Actual Prices')
+
+```
+
+
+
+
+```{r}
+# Write Predictions to Submission File
+predDTreeScore = predict(m1, newdata=score)
+submissionFile = data.frame(id = score$id, price = predDTreeScore)
+write.csv(submissionFile, './my_submission1.csv',row.names = F)
+```
+
+
+
